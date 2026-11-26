@@ -4,7 +4,7 @@ import pandas as pd
 
 # --- 網頁基礎設定 ---
 st.set_page_config(
-    page_title="全行業美股估值自動分析系統",
+    page_title="全行業美股估值與持倉監控系統",
     page_icon="📊",
     layout="wide"
 )
@@ -29,7 +29,7 @@ def fmt_num(val, is_pct=False, is_currency=False, decimals=2):
         return f"${val:,.2f}"
     return f"{val:.{decimals}f}"
 
-# --- 核心分析引擎 (加入快取 30 分鐘避免重複請求) ---
+# --- 核心分析引擎 (快取 30 分鐘) ---
 @st.cache_data(ttl=1800, show_spinner=False)
 def analyze_stock_data(ticker_symbol):
     symbol = ticker_symbol.strip().upper()
@@ -37,7 +37,7 @@ def analyze_stock_data(ticker_symbol):
         stock = yf.Ticker(symbol)
         info = stock.info
         if not info or (info.get("currentPrice") is None and info.get("regularMarketPrice") is None):
-            return {"error": f"找不到 {symbol} 的有效報價數據（請確認代號是否為個股）"}
+            return {"error": f"找不到 {symbol} 的有效報價數據（請確認代號是否正確）"}
     except Exception as e:
         return {"error": f"抓取 {symbol} 時發生錯誤: {e}"}
 
@@ -81,7 +81,7 @@ def analyze_stock_data(ticker_symbol):
     div_rate = info.get("dividendRate")
     div_yield = (div_rate / price) if (div_rate and price) else info.get("trailingAnnualDividendYield")
     payout_ratio = info.get("payoutRatio")
-    debt_to_equity = info.get("debtToEquity")  # yfinance 回傳為百分比，如 120 代表 1.2x
+    debt_to_equity = info.get("debtToEquity")
     current_ratio = info.get("currentRatio")
     beta = info.get("beta")
 
@@ -90,7 +90,7 @@ def analyze_stock_data(ticker_symbol):
     p_fcf = (mcap / fcf) if (mcap and fcf and fcf > 0) else None
     p_ocf = (mcap / ocf) if (mcap and ocf and ocf > 0) else None
 
-    # 嘗試抓取最新 CapEx
+    # 抓取最新 CapEx
     capex = None
     try:
         cf = stock.cashflow
@@ -121,7 +121,6 @@ def analyze_stock_data(ticker_symbol):
         warnings.append("此標的為 ETF，財報估值模型不適用，請改看成分股與費用率")
 
     elif model_type == "金融 / 銀行模型":
-        # 1. P/B 估值 (25分)
         if pb is not None and pb > 0:
             if pb < 1.3:
                 score += 25; reasons.append(f"市淨率 P/B ({pb:.2f}x) 處於低估區間")
@@ -131,7 +130,6 @@ def analyze_stock_data(ticker_symbol):
                 score += 10
             else:
                 score += 4; warnings.append(f"金融股 P/B ({pb:.2f}x) 偏高")
-        # 2. Forward P/E (20分)
         if pe_fwd is not None and pe_fwd > 0:
             if pe_fwd < 12:
                 score += 20; reasons.append(f"Forward P/E ({pe_fwd:.1f}x) 具吸引力")
@@ -141,7 +139,6 @@ def analyze_stock_data(ticker_symbol):
                 score += 8
             else:
                 score += 3; warnings.append(f"Forward P/E ({pe_fwd:.1f}x) 高於金融業平均")
-        # 3. ROE 獲利效率 (25分)
         if roe is not None:
             if roe > 0.14:
                 score += 25; reasons.append(f"ROE 高達 {roe*100:.1f}%，資本回報極佳")
@@ -151,7 +148,6 @@ def analyze_stock_data(ticker_symbol):
                 score += 10
             else:
                 warnings.append(f"ROE 偏低 ({roe*100:.1f}%)")
-        # 4. ROA (10分)
         if roa is not None:
             if roa > 0.012:
                 score += 10; reasons.append(f"金融業 ROA ({roa*100:.2f}%) 表現優異")
@@ -159,7 +155,6 @@ def analyze_stock_data(ticker_symbol):
                 score += 6
             else:
                 score += 2
-        # 5. 股息與派息安全 (10分)
         if div_yield is not None and div_yield > 0.025:
             score += 6; reasons.append(f"股息率 {div_yield*100:.2f}% 提供良好下檔保護")
         elif div_yield is not None and div_yield > 0.01:
@@ -168,14 +163,12 @@ def analyze_stock_data(ticker_symbol):
             score += 4
         elif payout_ratio is not None and payout_ratio >= 0.75:
             warnings.append(f"派息比率偏高 ({payout_ratio*100:.0f}%)")
-        # 6. 風險 Beta (10分)
         if beta is not None:
             score += 10 if beta < 1.15 else (6 if beta < 1.4 else 2)
         else:
             score += 5
 
     elif model_type == "REITs / 房地產模型":
-        # 1. 股息率 (30分)
         if div_yield is not None:
             if div_yield >= 0.05:
                 score += 30; reasons.append(f"股息率達 {div_yield*100:.2f}%，收息回報吸引")
@@ -185,7 +178,6 @@ def analyze_stock_data(ticker_symbol):
                 score += 12
             else:
                 score += 4; warnings.append("作為 REITs，股息率偏低")
-        # 2. P/OCF 近似 P/FFO (25分)
         if p_ocf is not None:
             if p_ocf < 14:
                 score += 25; reasons.append(f"營運現金流倍數 P/OCF ({p_ocf:.1f}x) 估值便宜")
@@ -197,7 +189,6 @@ def analyze_stock_data(ticker_symbol):
                 score += 4; warnings.append(f"P/OCF ({p_ocf:.1f}x) 估值偏貴")
         else:
             warnings.append("營運現金流數據不足或為負")
-        # 3. P/B (15分)
         if pb is not None and pb > 0:
             if pb < 1.5:
                 score += 15; reasons.append(f"P/B ({pb:.2f}x) 貼近資產淨值")
@@ -205,14 +196,12 @@ def analyze_stock_data(ticker_symbol):
                 score += 10
             else:
                 score += 4
-        # 4. 營業利潤率 (10分)
         if op_margin is not None and op_margin > 0.25:
             score += 10
         elif op_margin is not None and op_margin > 0.15:
             score += 6
         else:
             warnings.append("房地產本業利潤率偏低")
-        # 5. 負債控管 D/E (10分)
         if debt_to_equity is not None:
             if debt_to_equity < 100:
                 score += 10; reasons.append(f"負債比率 ({debt_to_equity:.0f}%) 控管穩健")
@@ -222,14 +211,12 @@ def analyze_stock_data(ticker_symbol):
                 score += 2; warnings.append(f"負債比率較高 ({debt_to_equity:.0f}%)，對利率敏感")
         else:
             score += 5
-        # 6. 波動 Beta (10分)
         if beta is not None:
             score += 10 if beta < 0.95 else (6 if beta < 1.2 else 2)
         else:
             score += 5
 
     elif model_type == "防禦 / 價值股模型":
-        # 1. Forward P/E (20分)
         if pe_fwd is not None and pe_fwd > 0:
             if pe_fwd < 16:
                 score += 20; reasons.append(f"Forward P/E ({pe_fwd:.1f}x) 估值具安全邊際")
@@ -241,7 +228,6 @@ def analyze_stock_data(ticker_symbol):
                 score += 2; warnings.append(f"Forward P/E ({pe_fwd:.1f}x) 對價值股偏高")
         else:
             warnings.append("缺乏正向預測盈利")
-        # 2. EV/EBITDA & P/FCF (20分)
         if ev_ebitda is not None and ev_ebitda > 0:
             score += 10 if ev_ebitda < 13 else (6 if ev_ebitda < 18 else 2)
         if p_fcf is not None:
@@ -253,7 +239,6 @@ def analyze_stock_data(ticker_symbol):
                 score += 2
         else:
             warnings.append("自由現金流為負數")
-        # 3. 獲利能力 FCF Margin & ROE (25分)
         if fcf_margin is not None:
             if fcf_margin > 0.12:
                 score += 13; reasons.append(f"FCF Margin ({fcf_margin*100:.1f}%) 造血穩定")
@@ -269,7 +254,6 @@ def analyze_stock_data(ticker_symbol):
             score += 7
         elif roe is not None and roe <= 0:
             warnings.append("ROE 為負數")
-        # 4. 股息與派息 (15分)
         if div_yield is not None and div_yield >= 0.03:
             score += 10; reasons.append(f"股息率 {div_yield*100:.2f}% 具備防禦收益")
         elif div_yield is not None and div_yield >= 0.015:
@@ -278,7 +262,6 @@ def analyze_stock_data(ticker_symbol):
             score += 5
         elif payout_ratio is not None and payout_ratio >= 0.90:
             warnings.append(f"派息比率過高 ({payout_ratio*100:.0f}%)，須留意減息風險")
-        # 5. 成長與盈虧檢查 (10分)
         if rev_growth is not None and rev_growth > 0.03:
             score += 5
         elif rev_growth is not None and rev_growth < 0:
@@ -287,7 +270,6 @@ def analyze_stock_data(ticker_symbol):
             score += 5
         else:
             warnings.append("處於淨虧損狀態")
-        # 6. 低波動加分 Beta (10分)
         if beta is not None:
             if beta < 0.9:
                 score += 10; reasons.append(f"Beta ({beta:.2f}) 低波動，抗跌力強")
@@ -300,7 +282,6 @@ def analyze_stock_data(ticker_symbol):
 
     else:
         # 科技 / 成長股模型
-        # [A] 估值維度 (40分)
         if pe_fwd is not None and pe_fwd > 0:
             if pe_fwd < 18:
                 score += 12; reasons.append(f"Forward P/E ({pe_fwd:.1f}x) 極具吸引力")
@@ -336,7 +317,6 @@ def analyze_stock_data(ticker_symbol):
         else:
             warnings.append("自由現金流為負數，無法計算正向 Price/FCF")
 
-        # [B] 獲利與現金流 (35分)
         if fcf_margin is not None:
             if fcf_margin > 0.15:
                 score += 12; reasons.append(f"Levered FCF Margin 高達 {fcf_margin*100:.1f}%，造血力極強")
@@ -367,7 +347,6 @@ def analyze_stock_data(ticker_symbol):
         else:
             warnings.append("本業處於營業虧損 (Operating Loss)")
 
-        # [C] 成長動能 (15分)
         if rev_growth is not None:
             if rev_growth > 0.15:
                 score += 8; reasons.append(f"營收高速增長 ({rev_growth*100:.1f}%)")
@@ -386,7 +365,6 @@ def analyze_stock_data(ticker_symbol):
             else:
                 warnings.append("預期未來 EPS 衰退")
 
-        # [D] 風險 Beta (10分)
         if beta is not None:
             if beta < 1.1:
                 score += 10
@@ -427,13 +405,129 @@ def analyze_stock_data(ticker_symbol):
 # ==========================================
 # 前端網頁介面 (UI)
 # ==========================================
-st.title("📊 全行業美股估值與自選股排名系統")
-st.caption("支援自動識別科技、銀行金融、REITs 與防禦型股票，動態切換估值指標並生成量化買賣建議。")
+st.title("📊 全行業美股估值與持倉監控系統")
+st.caption("支援自動識別科技、銀行金融、REITs 與防禦型股票，內建即時指標教學與個人持倉盈虧計算。")
 
-tab1, tab2 = st.tabs(["🏆 批次掃描自選股並自動排名", "🔍 單一股票深度體檢"])
+# 頂部可展開的「指標速查手冊」
+with st.expander("📖 點擊展開：各大估值與財務指標「意義及參考標準」速查表"):
+    st.markdown("""
+    | 類別 | 核心指標 | 參考標準（越符合越具安全邊際） | 指標意義 |
+    | :--- | :--- | :--- | :--- |
+    | **估值便宜度** | **Forward P/E** (預測本益比) | `< 20` 具吸引力；`20–30` 合理；`> 35` 偏貴 | 市場願意為「未來一年」盈利支付的倍數，越低越安全。 |
+    | **成長性價比** | **PEG Ratio** | `< 1.2` 低估；`1.2–2.0` 合理；`> 2.0` 偏貴 | 本益比除以盈利增長率，避免買到「高估值低成長」的股票。 |
+    | **現金流估值** | **Price / FCF** (市現率) | `< 20` 優異；`20–30` 合理 | 股價相對於「真實自由現金流」的倍數，比 P/E 更難造假。 |
+    | **銀行 / 資產** | **P/B** (市淨率) | 銀行 `< 1.5` 便宜；REITs `< 1.5` 貼近淨值 | 股價相對於帳面淨資產的倍數，金融與房地產股核心指標。 |
+    | **造血能力** | **Levered FCF Margin** | `> 15%` 極強；`5%–15%` 良好；`< 0%` 燒錢 | 每 $100 營收最終能留下多少真實自由現金。 |
+    | **獲利效率** | **ROA / ROE** | `ROA > 8%`（銀行 > 1%）；`ROE > 15%` 為優 | 衡量公司運用總資產 / 股東資金賺錢的效率。 |
+    | **波動風險** | **Beta** (波動係數) | `< 1.0` 抗跌；`1.0–1.5` 正常；`> 1.5` 劇烈 | 相對於大盤的波動幅度，高 Beta 股需預留更高安全邊際。 |
+    """)
 
-# --- Tab 1: 批次掃描與自動排名 ---
+tab1, tab2, tab3 = st.tabs([
+    "💼 我的持倉監控與盈虧計算",
+    "🏆 批次掃描自選股並自動排名",
+    "🔍 單一股票深度體檢 (含指標參考)"
+])
+
+# ==========================================
+# Tab 1: 個人持倉監控與盈虧計算
+# ==========================================
 with tab1:
+    st.subheader("💼 個人持倉即時盈虧與目標價追蹤")
+    st.caption("您可以直接在下表雙擊修改「股數」、「成本均價」或「目標價」，或點擊表格最下方 `+` 新增其他股票。")
+
+    default_portfolio = pd.DataFrame([
+        {"股票代號": "GOOG", "持倉股數": 28.5177, "成本均價(USD)": 280.55, "目標價(USD)": 350.00},
+        {"股票代號": "TSM",  "持倉股數": 4.2200,  "成本均價(USD)": 379.38, "目標價(USD)": 455.00},
+    ])
+
+    edited_df = st.data_editor(
+        default_portfolio,
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "股票代號": st.column_config.TextColumn("股票代號", required=True),
+            "持倉股數": st.column_config.NumberColumn("持倉股數", min_value=0.0, format="%.4f", required=True),
+            "成本均價(USD)": st.column_config.NumberColumn("成本均價 (USD)", min_value=0.0, format="$%.2f", required=True),
+            "目標價(USD)": st.column_config.NumberColumn("第一目標價 (USD)", min_value=0.0, format="$%.2f", required=True),
+        }
+    )
+
+    if st.button("🔄 更新即時股價並計算盈虧", type="primary"):
+        rows = []
+        total_cost = 0.0
+        total_value = 0.0
+        total_target_value = 0.0
+
+        with st.spinner("正在從美股抓取最新報價與估值評分..."):
+            for _, row in edited_df.iterrows():
+                sym = str(row["股票代號"]).strip().upper()
+                shares = float(row["持倉股數"] or 0)
+                avg_cost = float(row["成本均價(USD)"] or 0)
+                target = float(row["目標價(USD)"] or 0)
+
+                if not sym or shares <= 0:
+                    continue
+
+                res = analyze_stock_data(sym)
+                if "error" in res:
+                    st.warning(res["error"])
+                    continue
+
+                price = float(res["price"])
+                cost_basis = shares * avg_cost
+                market_val = shares * price
+                pnl_usd = market_val - cost_basis
+                pnl_pct = (pnl_usd / cost_basis) if cost_basis > 0 else 0.0
+
+                dist_to_target = ((target - price) / price) if (target > 0 and price > 0) else None
+                target_profit = (shares * target - cost_basis) if target > 0 else None
+
+                total_cost += cost_basis
+                total_value += market_val
+                total_target_value += (shares * target) if target > 0 else market_val
+
+                # 狀態提示
+                if target > 0 and price >= target:
+                    action_hint = "🎯 已達目標價！可執行停利"
+                elif pnl_pct <= -0.10:
+                    action_hint = "📉 浮虧逾 10%，留意技術支撐"
+                else:
+                    action_hint = "⏳ 續抱觀察中"
+
+                rows.append({
+                    "代號": sym,
+                    "最新股價": f"${price:,.2f}",
+                    "成本均價": f"${avg_cost:,.2f}",
+                    "持倉股數": f"{shares:.4f}",
+                    "總投入成本": f"${cost_basis:,.2f}",
+                    "目前市值": f"${market_val:,.2f}",
+                    "未實現盈虧($)": f"{'+' if pnl_usd >= 0 else ''}${pnl_usd:,.2f}",
+                    "盈虧(%)": f"{'+' if pnl_pct >= 0 else ''}{pnl_pct*100:.2f}%",
+                    "目標價": f"${target:,.2f}",
+                    "距目標價漲幅": fmt_num(dist_to_target, is_pct=True),
+                    "達標潛在利潤": f"+${target_profit:,.2f}" if (target_profit and target_profit > 0) else fmt_num(target_profit, is_currency=True),
+                    "估值評分": f"{res['score']} / 100",
+                    "狀態提示": action_hint
+                })
+
+        if rows:
+            total_pnl = total_value - total_cost
+            total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0.0
+            total_potential_profit = total_target_value - total_cost
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("總投入成本 (USD)", f"${total_cost:,.2f}")
+            c2.metric("目前總市值 (USD)", f"${total_value:,.2f}")
+            c3.metric("總未實現盈虧", f"{'+' if total_pnl >= 0 else ''}${total_pnl:,.2f}", f"{'+' if total_pnl_pct >= 0 else ''}{total_pnl_pct:.2f}%")
+            c4.metric("全部達標潛在總利潤", f"+${total_potential_profit:,.2f}")
+
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+# ==========================================
+# Tab 2: 批次掃描與自動排名
+# ==========================================
+with tab2:
     st.subheader("自選股清單批次掃描")
     default_watchlist = "GOOG, TSM, NVDA, MSFT, AMZN, META, AAPL, ASML, AMD, AVGO, VRT, V, MA, AXP, JPM, O, ABBV, TGT, MMM, VZ"
     watchlist_input = st.text_area(
@@ -472,7 +566,6 @@ with tab1:
                         st.write(f"- {err}")
 
             if results:
-                # 依綜合評分由高到低排序
                 results.sort(key=lambda x: x["score"], reverse=True)
 
                 df_summary = pd.DataFrame([{
@@ -496,7 +589,6 @@ with tab1:
                 st.success(f"✅ 掃描完成！共分析 {len(results)} 檔美股，已依綜合估值評分由高至低排序。")
                 st.dataframe(df_summary, use_container_width=True, hide_index=True)
 
-                # 下載 CSV 報告
                 csv = df_summary.to_csv(index=False).encode("utf-8-sig")
                 st.download_button(
                     label="📥 下載排名結果 (CSV / Excel 可開)",
@@ -505,7 +597,6 @@ with tab1:
                     mime="text/csv"
                 )
 
-                # 快速摘要前 3 名亮點
                 st.markdown("### 🌟 本次掃描評分前三名")
                 top_cols = st.columns(min(3, len(results)))
                 for col, r in zip(top_cols, results[:3]):
@@ -515,8 +606,10 @@ with tab1:
                                 f"📌 模型：{r['model_type']}\n\n"
                                 f"✅ 亮點：{r['reasons'][0] if r['reasons'] else '各項數據均衡'}")
 
-# --- Tab 2: 單一股票深度體檢 ---
-with tab2:
+# ==========================================
+# Tab 3: 單一股票深度體檢 (附帶即時指標參考)
+# ==========================================
+with tab3:
     col_in, col_btn = st.columns([3, 1])
     with col_in:
         single_ticker = st.text_input("輸入單一美股代號（例如：GOOG, TSM, JPM, O, ABBV）：", value="TSM")
@@ -535,14 +628,12 @@ with tab2:
             st.markdown(f"## {r['name']} ({r['symbol']})")
             st.caption(f"所屬板塊：{r['sector']} / {r['industry']}  |  套用引擎：**{r['model_type']}**")
 
-            # 頂部關鍵指標卡片
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("最新股價", fmt_num(r["price"], is_currency=True), f"距52週高點 {fmt_num(r['pct_from_high'], is_pct=True)}")
             m2.metric("總市值", fmt_num(r["mcap"], is_currency=True))
             m3.metric("系統綜合評分", f"{r['score']} / 100")
             m4.metric("操作建議", r["verdict"])
 
-            # 優劣勢摘要
             c_pro, c_con = st.columns(2)
             with c_pro:
                 st.success("**✅ 核心優勢**\n\n" + ("\n".join([f"- {x}" for x in r["reasons"]]) if r["reasons"] else "- 暫無顯著超額亮點"))
@@ -551,40 +642,84 @@ with tab2:
 
             st.divider()
 
-            # 詳細四大數據表
-            d1, d2 = st.columns(2)
-            with d1:
-                st.markdown("#### 1. 核心估值倍數")
-                val_df = pd.DataFrame({
-                    "指標": ["Trailing P/E (TTM)", "Forward P/E", "PEG Ratio", "Price / Book (P/B)",
-                           "Price / Sales (P/S)", "EV / Sales", "EV / EBITDA", "Price / FCF", "Price / OCF (REITs參考)"],
-                    "數值": [fmt_num(r["pe_ttm"]), fmt_num(r["pe_fwd"]), fmt_num(r["peg"]), fmt_num(r["pb"]),
-                           fmt_num(r["ps_ttm"]), fmt_num(r["ev_sales"]), fmt_num(r["ev_ebitda"]), fmt_num(r["p_fcf"]), fmt_num(r["p_ocf"])]
-                })
-                st.dataframe(val_df, use_container_width=True, hide_index=True)
+            # 1. 核心估值倍數 (附帶參考標準)
+            st.markdown("#### 1. 核心估值倍數（越低越具安全邊際）")
+            val_df = pd.DataFrame({
+                "指標": [
+                    "Trailing P/E (TTM)", "Forward P/E", "PEG Ratio", "Price / Book (P/B)",
+                    "Price / Sales (P/S)", "EV / Sales", "EV / EBITDA", "Price / FCF", "Price / OCF"
+                ],
+                "目前數值": [
+                    fmt_num(r["pe_ttm"]), fmt_num(r["pe_fwd"]), fmt_num(r["peg"]), fmt_num(r["pb"]),
+                    fmt_num(r["ps_ttm"]), fmt_num(r["ev_sales"]), fmt_num(r["ev_ebitda"]), fmt_num(r["p_fcf"]), fmt_num(r["p_ocf"])
+                ],
+                "指標意義與參考標準": [
+                    "過去12個月本益比；一般 < 20 偏低估，> 35 偏貴",
+                    "未來1年預測本益比；< 20 具安全邊際，銀行股 < 12 為優",
+                    "本益比 / 盈利增速；< 1.2 低估，1.2–2.0 合理，> 2.0 偏貴",
+                    "股價 / 每股淨值；銀行與 REITs 核心指標，< 1.5 具防禦性",
+                    "股價 / 每股營收；適合評估尚未盈利的高成長股，< 5 較穩健",
+                    "企業價值 / 營收；計入負債與現金，比 P/S 更精準",
+                    "企業價值 / 息稅折舊前利潤；< 15 便宜，適合重資產與半導體業",
+                    "市值 / 自由現金流；< 20 優異，20–30 合理，檢驗真實含金量",
+                    "市值 / 營運現金流；REITs 估值核心 (近似 P/FFO)，< 15 便宜"
+                ]
+            })
+            st.dataframe(val_df, use_container_width=True, hide_index=True)
 
-                st.markdown("#### 3. 股息、負債與風險")
-                risk_df = pd.DataFrame({
-                    "指標": ["股息率 (Dividend Yield)", "派息比率 (Payout Ratio)", "負債權益比 (Debt/Equity %)",
-                           "流動比率 (Current Ratio)", "Beta (波動係數)", "52週低點 / 高點"],
-                    "數值": [fmt_num(r["div_yield"], is_pct=True), fmt_num(r["payout_ratio"], is_pct=True),
-                           fmt_num(r["debt_to_equity"]), fmt_num(r["current_ratio"]), fmt_num(r["beta"]),
-                           f"{fmt_num(r['low_52w'], is_currency=True)} / {fmt_num(r['high_52w'], is_currency=True)}"]
-                })
-                st.dataframe(risk_df, use_container_width=True, hide_index=True)
+            # 2. 獲利能力與現金流 (附帶參考標準)
+            st.markdown("#### 2. 獲利能力與現金流 (TTM)")
+            prof_df = pd.DataFrame({
+                "指標": [
+                    "總營收 (Revenue)", "營收年增率 (YoY)", "營業利潤 / 虧損", "淨利潤 / 虧損",
+                    "EPS (TTM / Forward)", "營運現金流 (OCF)", "自由現金流 (FCF)", "資本開支 (CapEx)",
+                    "Levered FCF Margin", "毛利率 / 營益率 / 淨利率", "ROA (資產報酬率)", "ROE (股東權益報酬率)"
+                ],
+                "目前數值": [
+                    fmt_num(r["revenue"], is_currency=True), fmt_num(r["rev_growth"], is_pct=True),
+                    fmt_num(r["op_income"], is_currency=True), fmt_num(r["net_income"], is_currency=True),
+                    f"{fmt_num(r['eps_ttm'])} / {fmt_num(r['eps_fwd'])}",
+                    fmt_num(r["ocf"], is_currency=True), fmt_num(r["fcf"], is_currency=True),
+                    fmt_num(r["capex"], is_currency=True), fmt_num(r["fcf_margin"], is_pct=True),
+                    f"{fmt_num(r['gross_margin'], is_pct=True)} / {fmt_num(r['op_margin'], is_pct=True)} / {fmt_num(r['profit_margin'], is_pct=True)}",
+                    fmt_num(r["roa"], is_pct=True), fmt_num(r["roe"], is_pct=True)
+                ],
+                "指標意義與參考標準": [
+                    "過去12個月總銷售額，衡量企業規模",
+                    "成長股 > 15% 為高速增長；價值股維持正增長即可",
+                    "本業賺錢能力；若為負數代表本業虧損 (Operating Loss)",
+                    "扣除所有費用與稅項後的最終利潤；負數為淨虧損 (Net Loss)",
+                    "每股盈餘；Forward EPS 高於 TTM 代表市場預期未來盈利成長",
+                    "本業實際收進來的現金流，應長期大於淨利潤",
+                    "扣除資本開支後真正可自由支配的現金，正數且穩定增長為佳",
+                    "擴建廠房與設備的投入（負數代表現金流出），半導體業通常較高",
+                    "自由現金流佔營收比例；> 15% 造血能力極強，5–15% 良好",
+                    "毛利率看產品護城河（科技/軟體常 > 50%），營益率看控費能力",
+                    "總資產獲利效率；一般企業 > 8% 為優，銀行業 > 1% 即屬優秀",
+                    "股東資金回報率；巴菲特最重視指標，> 15% 具強大競爭優勢"
+                ]
+            })
+            st.dataframe(prof_df, use_container_width=True, hide_index=True)
 
-            with d2:
-                st.markdown("#### 2. 獲利能力與現金流 (TTM)")
-                prof_df = pd.DataFrame({
-                    "指標": ["總營收 (Revenue)", "營收年增率 (YoY)", "營業利潤 / 虧損", "淨利潤 / 虧損",
-                           "EPS (TTM / Forward)", "營運現金流 (OCF)", "自由現金流 (FCF)", "資本開支 (CapEx)",
-                           "Levered FCF Margin", "毛利率 / 營業利潤率 / 淨利率", "ROA (資產報酬率)", "ROE (股東權益報酬率)"],
-                    "數值": [fmt_num(r["revenue"], is_currency=True), fmt_num(r["rev_growth"], is_pct=True),
-                           fmt_num(r["op_income"], is_currency=True), fmt_num(r["net_income"], is_currency=True),
-                           f"{fmt_num(r['eps_ttm'])} / {fmt_num(r['eps_fwd'])}",
-                           fmt_num(r["ocf"], is_currency=True), fmt_num(r["fcf"], is_currency=True),
-                           fmt_num(r["capex"], is_currency=True), fmt_num(r["fcf_margin"], is_pct=True),
-                           f"{fmt_num(r['gross_margin'], is_pct=True)} / {fmt_num(r['op_margin'], is_pct=True)} / {fmt_num(r['profit_margin'], is_pct=True)}",
-                           fmt_num(r["roa"], is_pct=True), fmt_num(r["roe"], is_pct=True)]
-                })
-                st.dataframe(prof_df, use_container_width=True, hide_index=True)
+            # 3. 股息、負債與風險 (附帶參考標準)
+            st.markdown("#### 3. 股息、財務健康與波動風險")
+            risk_df = pd.DataFrame({
+                "指標": [
+                    "股息率 (Dividend Yield)", "派息比率 (Payout Ratio)", "負債權益比 (Debt/Equity %)",
+                    "流動比率 (Current Ratio)", "Beta (波動係數)", "52週低點 / 高點"
+                ],
+                "目前數值": [
+                    fmt_num(r["div_yield"], is_pct=True), fmt_num(r["payout_ratio"], is_pct=True),
+                    fmt_num(r["debt_to_equity"]), fmt_num(r["current_ratio"]), fmt_num(r["beta"]),
+                    f"{fmt_num(r['low_52w'], is_currency=True)} / {fmt_num(r['high_52w'], is_currency=True)}"
+                ],
+                "指標意義與參考標準": [
+                    "每年股息佔股價比例；收息/防禦股 > 3%、REITs > 5% 具吸引力",
+                    "盈餘用來發股息的比例；一般 < 70% 較安全，> 90% 須防減息",
+                    "總負債 / 股東權益；< 100% 財務穩健，> 150% 對升息較敏感",
+                    "短期償債能力；> 1.2 代表短期現金充裕，< 1.0 須留意流動性",
+                    "相對於大盤波動幅度；< 1.0 抗跌，> 1.5 波動劇烈需提高安全邊際",
+                    "過去一年價格區間，用來判斷目前股價處於相對高位或低位"
+                ]
+            })
+            st.dataframe(risk_df, use_container_width=True, hide_index=True)
