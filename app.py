@@ -237,21 +237,43 @@ def render_gauge_svg(score, verdict):
     </div>
     """
 
-# --- 官方 Google Translate 免費 API (繁體中文) ---
-@st.cache_data(ttl=3600, show_spinner=False)
+# --- 雙通道穩定繁體中文翻譯引擎 (MyMemory + Google Fallback) ---
+@st.cache_data(ttl=86400, show_spinner=False)
 def translate_to_zh_tw(text):
-    if not text: return text
+    if not text:
+        return text
+    clean_text = text.strip()
+
+    # 通道 1: MyMemory 開放翻譯 API (最耐伺服器 IP 請求)
+    try:
+        url = f"https://api.mymemory.translated.net/get?q={urllib.parse.quote(clean_text)}&langpair=en|zh-TW"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            res_txt = data.get("responseData", {}).get("translatedText", "")
+            if res_txt and not res_txt.startswith("MYMEMORY WARNING"):
+                return res_txt
+    except Exception:
+        pass
+
+    # 通道 2: Google Translate 備援 (附帶防阻擋 Header)
     try:
         url = "https://translate.googleapis.com/translate_a/single"
-        params = {"client": "gtx", "sl": "auto", "tl": "zh-TW", "dt": "t", "q": text}
+        params = {"client": "gtx", "sl": "en", "tl": "zh-TW", "dt": "t", "q": clean_text}
         req_url = f"{url}?{urllib.parse.urlencode(params)}"
-        req = urllib.request.Request(req_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-        with urllib.request.urlopen(req, timeout=5) as response:
+        req = urllib.request.Request(req_url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://translate.google.com/"
+        })
+        with urllib.request.urlopen(req, timeout=4) as response:
             res_json = json.loads(response.read().decode("utf-8"))
-            translated = "".join([segment[0] for segment in res_json[0] if segment[0]])
-            return translated if translated else text
+            translated = "".join([seg[0] for seg in res_json[0] if seg and seg[0]])
+            if translated:
+                return translated
     except Exception:
-        return text
+        pass
+
+    return clean_text
 
 # --- 全球 7 大權威財經媒體抓取 ---
 HIGH_IMPACT_KEYWORDS = {
@@ -361,7 +383,6 @@ def fetch_indices():
         price, prev = None, None
         try:
             t = yf.Ticker(sym)
-            # 優先從 fast_info 取得最新即時價
             if hasattr(t, "fast_info"):
                 price = getattr(t.fast_info, "last_price", None)
                 prev = getattr(t.fast_info, "previous_close", None)
@@ -391,7 +412,6 @@ def analyze_stock_data(ticker_symbol):
     except Exception as e:
         return {"error": f"抓取 {symbol} 時發生錯誤: {e}"}
 
-    # 多重備援獲取股價
     price = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("navPrice")
     prev_close = info.get("previousClose") or info.get("regularMarketPreviousClose")
 
@@ -414,7 +434,7 @@ def analyze_stock_data(ticker_symbol):
             pass
 
     if price is None:
-        return {"error": f"找不到 {symbol} 的有效報價數據，可能因連線頻率受限，請稍候再試。"}
+        return {"error": f"找不到 {symbol} 的有效報價數據，請稍候再試。"}
 
     prev_close = prev_close or price
     day_chg = price - prev_close
@@ -581,7 +601,6 @@ def analyze_stock_data(ticker_symbol):
             if roa > 0.10: score += 10; reasons.append(f"ROA {roa*100:.1f}% 資產效率極高")
             elif roa > 0.05: score += 6
             elif roa > 0: score += 2
-        else: warnings.append("ROA 為負數")
         if net_income is not None and net_income > 0: score += 7
         else: warnings.append("處於淨虧損 (Net Loss)")
         if op_income is not None and op_income > 0: score += 6
