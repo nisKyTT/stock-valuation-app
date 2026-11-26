@@ -3,10 +3,10 @@ import yfinance as yf
 import pandas as pd
 import urllib.request
 import urllib.parse
+import json
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from email.utils import parsedate_to_datetime
-from deep_translator import GoogleTranslator
 
 # --- 網頁基礎設定 ---
 st.set_page_config(
@@ -237,7 +237,32 @@ def render_gauge_svg(score, verdict):
     </div>
     """
 
-# --- 全球 7 大權威財經媒體抓取 + 自動繁體中文翻譯引擎 (快取 20 分鐘) ---
+# --- 官方 Google Translate 免費 API (穩定輸出繁體中文) ---
+@st.cache_data(ttl=3600, show_spinner=False)
+def translate_to_zh_tw(text):
+    if not text:
+        return text
+    try:
+        url = "https://translate.googleapis.com/translate_a/single"
+        params = {
+            "client": "gtx",
+            "sl": "auto",
+            "tl": "zh-TW",
+            "dt": "t",
+            "q": text
+        }
+        req_url = f"{url}?{urllib.parse.urlencode(params)}"
+        req = urllib.request.Request(req_url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
+        with urllib.request.urlopen(req, timeout=5) as response:
+            res_json = json.loads(response.read().decode("utf-8"))
+            translated = "".join([segment[0] for segment in res_json[0] if segment[0]])
+            return translated if translated else text
+    except Exception:
+        return text
+
+# --- 全球 7 大權威財經媒體抓取 (快取 15 分鐘) ---
 HIGH_IMPACT_KEYWORDS = {
     "財報/業績": ["earnings", "revenue", "guidance", "quarter", "q1", "q2", "q3", "q4", "profit", "beat", "miss", "forecast", "outlook", "sales"],
     "政策/監管": ["tariff", "trump", "fed", "rate", "antitrust", "doj", "lawsuit", "china", "export", "ban", "sanction", "chips act", "regulation", "sec"],
@@ -245,25 +270,20 @@ HIGH_IMPACT_KEYWORDS = {
     "AI/重大業務": ["ai", "chip", "2nm", "cloud", "nvidia", "openai", "datacenter", "capex", "acquisition", "merger", "deal", "partnership", "dividend", "buyback"]
 }
 
-@st.cache_data(ttl=1200, show_spinner=False)
-def translate_to_zh_tw(text):
-    try:
-        return GoogleTranslator(source="auto", target="zh-TW").translate(text)
-    except Exception:
-        return text
-
-@st.cache_data(ttl=1200, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def fetch_authoritative_news(ticker_symbol, max_items=6):
     symbol = ticker_symbol.strip().upper()
     parsed = []
 
-    # 1. 優先從 Google News RSS 鎖定全球 7 大權威財經媒體
+    # 1. 鎖定全球 7 大權威財經媒體
     sites = "(site:reuters.com OR site:bloomberg.com OR site:cnbc.com OR site:wsj.com OR site:ft.com OR site:barrons.com OR site:marketwatch.com)"
     query = urllib.parse.quote(f'"{symbol}" stock {sites} when:14d')
     rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
 
     try:
-        req = urllib.request.Request(rss_url, headers={"User-Agent": "Mozilla/5.0"})
+        req = urllib.request.Request(rss_url, headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+        })
         with urllib.request.urlopen(req, timeout=8) as resp:
             xml_data = resp.read()
         root = ET.fromstring(xml_data)
@@ -274,7 +294,6 @@ def fetch_authoritative_news(ticker_symbol, max_items=6):
             source_el = item.find("source")
             publisher = source_el.text if (source_el is not None and source_el.text) else "權威外媒"
 
-            # 去除 Google News 標題尾端的 " - Publisher"
             title_en = raw_title.rsplit(" - ", 1)[0].strip() if " - " in raw_title else raw_title.strip()
             try:
                 date_str = parsedate_to_datetime(pub_date_raw).strftime("%Y-%m-%d")
@@ -298,7 +317,7 @@ def fetch_authoritative_news(ticker_symbol, max_items=6):
     except Exception:
         pass
 
-    # 2. 若權威媒體近 14 天無新聞，自動回退至 yfinance 補齊
+    # 2. 自動回退機制
     if not parsed:
         try:
             for item in (yf.Ticker(symbol).news or [])[:8]:
@@ -325,7 +344,6 @@ def fetch_authoritative_news(ticker_symbol, max_items=6):
         except Exception:
             pass
 
-    # 依「重大影響 > 標籤數 > 日期」排序，只對最終顯示的前 N 則進行繁體中文翻譯（加快速度）
     parsed.sort(key=lambda x: (x["is_major"], len(x["tags"]), x["date"]), reverse=True)
     top_news = parsed[:max_items]
     for n in top_news:
@@ -551,6 +569,7 @@ def analyze_stock_data(ticker_symbol):
             if roa > 0.10: score += 10; reasons.append(f"ROA {roa*100:.1f}% 資產效率極高")
             elif roa > 0.05: score += 6
             elif roa > 0: score += 2
+        else: warnings.append("ROA 為負數")
         if net_income is not None and net_income > 0: score += 7
         else: warnings.append("處於淨虧損 (Net Loss)")
         if op_income is not None and op_income > 0: score += 6
@@ -659,7 +678,7 @@ with tab_watch:
                 """, unsafe_allow_html=True)
 
 # ==========================================
-# Tab 2: 個股深度體檢 (含全球 7 大權威外媒繁中翻譯)
+# Tab 2: 個股深度體檢
 # ==========================================
 with tab_detail:
     c_in, c_btn = st.columns([4, 1])
@@ -717,8 +736,8 @@ with tab_detail:
                 st.markdown(html, unsafe_allow_html=True)
 
             with t_news:
-                st.caption("直連全球 7 大權威媒體（Reuters / Bloomberg / WSJ / FT / CNBC / Barron's / MarketWatch），自動翻譯為繁體中文：")
-                with st.spinner("正在抓取權威外媒並翻譯為繁體中文..."):
+                st.caption("直連全球 7 大權威媒體（Reuters / Bloomberg / WSJ / FT / CNBC / Barron's / MarketWatch），已由官方引擎直譯為繁體中文：")
+                with st.spinner("正在抓取權威外媒並直譯為繁體中文..."):
                     news_items = fetch_authoritative_news(r["symbol"], max_items=6)
                 render_news_list(news_items, show_symbol=False)
 
@@ -856,7 +875,6 @@ with tab_port:
             </div>
             """, unsafe_allow_html=True)
 
-        # 持倉股專屬：權威外媒重大新聞快訊 (繁中)
         st.write("")
         with st.expander("🔥 查看影響目前持倉的權威外媒重大新聞（繁體中文）", expanded=False):
             with st.spinner("正在抓取 Reuters / Bloomberg / CNBC 等權威報導並翻譯..."):
