@@ -1,7 +1,12 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import urllib.request
+import urllib.parse
+import xml.etree.ElementTree as ET
 from datetime import datetime
+from email.utils import parsedate_to_datetime
+from deep_translator import GoogleTranslator
 
 # --- 網頁基礎設定 ---
 st.set_page_config(
@@ -124,6 +129,7 @@ st.markdown("""
     }
     .pill-green { background: rgba(34,197,94,0.18); color: #4ade80; border: 1px solid rgba(34,197,94,0.4); }
     .pill-yellow { background: rgba(245,158,11,0.18); color: #fbbf24; border: 1px solid rgba(245,158,11,0.4); }
+    .pill-blue { background: rgba(59,130,246,0.18); color: #60a5fa; border: 1px solid rgba(59,130,246,0.4); }
     .pill-gray { background: rgba(156,163,175,0.18); color: #d1d5db; border: 1px solid rgba(156,163,175,0.4); }
     .pill-red { background: rgba(239,68,68,0.18); color: #f87171; border: 1px solid rgba(239,68,68,0.4); }
 
@@ -140,29 +146,35 @@ st.markdown("""
     .kv-hint { font-size: 11px; color: #848e9c; margin-top: 2px; }
     .kv-val { font-size: 14px; font-weight: 700; color: #ffffff; text-align: right; white-space: nowrap; margin-left: 10px; }
 
-    /* 新聞卡片 */
+    /* 權威新聞卡片 */
     .news-card {
         display: block;
         text-decoration: none !important;
         background: #111418;
         border-bottom: 1px solid #1e2329;
-        padding: 12px 14px;
+        padding: 13px 14px;
         transition: background 0.15s;
     }
     .news-card:hover { background: #181c22; }
-    .news-title {
-        font-size: 14px;
-        font-weight: 600;
-        color: #f3f4f6;
+    .news-title-zh {
+        font-size: 15px;
+        font-weight: 700;
+        color: #f9fafb;
         line-height: 1.45;
-        margin-bottom: 6px;
+        margin-bottom: 4px;
+    }
+    .news-title-en {
+        font-size: 11px;
+        color: #848e9c;
+        line-height: 1.35;
+        margin-bottom: 7px;
     }
     .news-meta {
         font-size: 11px;
-        color: #848e9c;
+        color: #9ca3af;
         display: flex;
         align-items: center;
-        gap: 8px;
+        gap: 6px;
         flex-wrap: wrap;
     }
 
@@ -225,7 +237,7 @@ def render_gauge_svg(score, verdict):
     </div>
     """
 
-# --- 精選重大市場新聞抓取引擎 (快取 15 分鐘) ---
+# --- 全球 7 大權威財經媒體抓取 + 自動繁體中文翻譯引擎 (快取 20 分鐘) ---
 HIGH_IMPACT_KEYWORDS = {
     "財報/業績": ["earnings", "revenue", "guidance", "quarter", "q1", "q2", "q3", "q4", "profit", "beat", "miss", "forecast", "outlook", "sales"],
     "政策/監管": ["tariff", "trump", "fed", "rate", "antitrust", "doj", "lawsuit", "china", "export", "ban", "sanction", "chips act", "regulation", "sec"],
@@ -233,71 +245,111 @@ HIGH_IMPACT_KEYWORDS = {
     "AI/重大業務": ["ai", "chip", "2nm", "cloud", "nvidia", "openai", "datacenter", "capex", "acquisition", "merger", "deal", "partnership", "dividend", "buyback"]
 }
 
-@st.cache_data(ttl=900, show_spinner=False)
-def fetch_major_news(ticker_symbol, max_items=6):
-    symbol = ticker_symbol.strip().upper()
+@st.cache_data(ttl=1200, show_spinner=False)
+def translate_to_zh_tw(text):
     try:
-        raw_news = yf.Ticker(symbol).news or []
+        return GoogleTranslator(source="auto", target="zh-TW").translate(text)
     except Exception:
-        return []
+        return text
 
+@st.cache_data(ttl=1200, show_spinner=False)
+def fetch_authoritative_news(ticker_symbol, max_items=6):
+    symbol = ticker_symbol.strip().upper()
     parsed = []
-    for item in raw_news:
-        # 相容新版與舊版 yfinance 新聞格式
-        if isinstance(item, dict) and isinstance(item.get("content"), dict):
-            c = item["content"]
-            title = c.get("title", "")
-            publisher = (c.get("provider") or {}).get("displayName", "財經新聞")
-            link = (c.get("canonicalUrl") or {}).get("url") or (c.get("clickThroughUrl") or {}).get("url") or "#"
-            pub_date = c.get("pubDate", "")
-            date_str = pub_date[:10] if len(pub_date) >= 10 else ""
-        else:
-            title = item.get("title", "")
-            publisher = item.get("publisher", "財經新聞")
-            link = item.get("link", "#")
-            ts = item.get("providerPublishTime")
-            date_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d") if ts else ""
 
-        if not title:
-            continue
+    # 1. 優先從 Google News RSS 鎖定全球 7 大權威財經媒體
+    sites = "(site:reuters.com OR site:bloomberg.com OR site:cnbc.com OR site:wsj.com OR site:ft.com OR site:barrons.com OR site:marketwatch.com)"
+    query = urllib.parse.quote(f'"{symbol}" stock {sites} when:14d')
+    rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
 
-        t_lower = title.lower()
-        matched_tags = []
-        for tag, kws in HIGH_IMPACT_KEYWORDS.items():
-            if any(kw in t_lower for kw in kws):
-                matched_tags.append(tag)
+    try:
+        req = urllib.request.Request(rss_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            xml_data = resp.read()
+        root = ET.fromstring(xml_data)
+        for item in root.findall(".//item")[:15]:
+            raw_title = item.findtext("title", "")
+            link = item.findtext("link", "#")
+            pub_date_raw = item.findtext("pubDate", "")
+            source_el = item.find("source")
+            publisher = source_el.text if (source_el is not None and source_el.text) else "權威外媒"
 
-        is_major = len(matched_tags) > 0
-        parsed.append({
-            "symbol": symbol,
-            "title": title,
-            "publisher": publisher,
-            "link": link,
-            "date": date_str,
-            "is_major": is_major,
-            "tags": matched_tags[:2]
-        })
+            # 去除 Google News 標題尾端的 " - Publisher"
+            title_en = raw_title.rsplit(" - ", 1)[0].strip() if " - " in raw_title else raw_title.strip()
+            try:
+                date_str = parsedate_to_datetime(pub_date_raw).strftime("%Y-%m-%d")
+            except Exception:
+                date_str = ""
 
-    # 重大影響新聞優先排最前面
+            if not title_en:
+                continue
+
+            t_lower = title_en.lower()
+            matched_tags = [tag for tag, kws in HIGH_IMPACT_KEYWORDS.items() if any(kw in t_lower for kw in kws)]
+            parsed.append({
+                "symbol": symbol,
+                "title_en": title_en,
+                "publisher": publisher,
+                "link": link,
+                "date": date_str,
+                "is_major": len(matched_tags) > 0,
+                "tags": matched_tags[:2]
+            })
+    except Exception:
+        pass
+
+    # 2. 若權威媒體近 14 天無新聞，自動回退至 yfinance 補齊
+    if not parsed:
+        try:
+            for item in (yf.Ticker(symbol).news or [])[:8]:
+                if isinstance(item, dict) and isinstance(item.get("content"), dict):
+                    c = item["content"]
+                    title_en = c.get("title", "")
+                    publisher = (c.get("provider") or {}).get("displayName", "Yahoo Finance")
+                    link = (c.get("canonicalUrl") or {}).get("url") or "#"
+                    date_str = c.get("pubDate", "")[:10]
+                else:
+                    title_en = item.get("title", "")
+                    publisher = item.get("publisher", "Yahoo Finance")
+                    link = item.get("link", "#")
+                    ts = item.get("providerPublishTime")
+                    date_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d") if ts else ""
+                if not title_en:
+                    continue
+                t_lower = title_en.lower()
+                matched_tags = [tag for tag, kws in HIGH_IMPACT_KEYWORDS.items() if any(kw in t_lower for kw in kws)]
+                parsed.append({
+                    "symbol": symbol, "title_en": title_en, "publisher": publisher,
+                    "link": link, "date": date_str, "is_major": len(matched_tags) > 0, "tags": matched_tags[:2]
+                })
+        except Exception:
+            pass
+
+    # 依「重大影響 > 標籤數 > 日期」排序，只對最終顯示的前 N 則進行繁體中文翻譯（加快速度）
     parsed.sort(key=lambda x: (x["is_major"], len(x["tags"]), x["date"]), reverse=True)
-    return parsed[:max_items]
+    top_news = parsed[:max_items]
+    for n in top_news:
+        n["title_zh"] = translate_to_zh_tw(n["title_en"])
+    return top_news
 
 def render_news_list(news_items, show_symbol=False):
     if not news_items:
-        st.info("暫無最新相關新聞數據。")
+        st.info("近 14 天內暫無權威財經媒體相關報導。")
         return
     html = '<div style="border:1px solid #2b3139; border-radius:10px; overflow:hidden;">'
     for n in news_items:
         sym_badge = f'<span class="us-tag">{n["symbol"]}</span>' if show_symbol else ""
         major_badge = '<span class="pill pill-red">🔥 重大影響</span>' if n["is_major"] else '<span class="pill pill-gray">市場動態</span>'
+        pub_badge = f'<span class="pill pill-blue">{n["publisher"]}</span>'
         tag_html = "".join([f'<span class="pill pill-yellow">{t}</span>' for t in n["tags"]])
         html += f"""
         <a href="{n['link']}" target="_blank" class="news-card">
-            <div class="news-title">{sym_badge}{n['title']}</div>
+            <div class="news-title-zh">{sym_badge}{n['title_zh']}</div>
+            <div class="news-title-en">{n['title_en']}</div>
             <div class="news-meta">
                 {major_badge}
+                {pub_badge}
                 {tag_html}
-                <span>{n['publisher']}</span>
                 <span>{n['date']}</span>
             </div>
         </a>"""
@@ -535,7 +587,7 @@ def analyze_stock_data(ticker_symbol):
     }
 
 # ==========================================
-# 頂部：美股三大指數色塊 (公開資訊，無隱私疑慮)
+# 頂部：美股三大指數色塊
 # ==========================================
 idx_data = fetch_indices()
 idx_html = '<div class="idx-grid">'
@@ -553,12 +605,12 @@ idx_html += '</div>'
 st.markdown(idx_html, unsafe_allow_html=True)
 
 # ==========================================
-# 主分頁導覽 (已將「私人庫存」移至最後一頁，避免開啟即曝光)
+# 主分頁導覽
 # ==========================================
 tab_watch, tab_detail, tab_port = st.tabs(["自選排行", "個股體檢", "🔒 私人庫存"])
 
 # ==========================================
-# Tab 1 (預設首頁): 自選組合批次排行
+# Tab 1: 自選組合批次排行
 # ==========================================
 with tab_watch:
     groups = {
@@ -607,7 +659,7 @@ with tab_watch:
                 """, unsafe_allow_html=True)
 
 # ==========================================
-# Tab 2: 個股深度體檢 (含精選重大市場新聞)
+# Tab 2: 個股深度體檢 (含全球 7 大權威外媒繁中翻譯)
 # ==========================================
 with tab_detail:
     c_in, c_btn = st.columns([4, 1])
@@ -648,7 +700,7 @@ with tab_detail:
                 elif not r["reasons"]:
                     st.info("各項財務數據表現均衡，暫無極端優勢或紅旗警示。")
 
-            t_news, t_val, t_prof, t_risk = st.tabs(["📰 重大新聞", "估值倍數", "獲利與現金流", "股息與風險"])
+            t_news, t_val, t_prof, t_risk = st.tabs(["📰 權威新聞 (繁中)", "估值倍數", "獲利與現金流", "股息與風險"])
 
             def render_kv_list(items):
                 html = '<div style="border:1px solid #2b3139; border-radius:10px; overflow:hidden;">'
@@ -665,8 +717,9 @@ with tab_detail:
                 st.markdown(html, unsafe_allow_html=True)
 
             with t_news:
-                st.caption("已自動篩選並置頂「財報、政策監管、機構評級、AI與重大業務」相關市場新聞（點擊可開原文）：")
-                news_items = fetch_major_news(r["symbol"], max_items=6)
+                st.caption("直連全球 7 大權威媒體（Reuters / Bloomberg / WSJ / FT / CNBC / Barron's / MarketWatch），自動翻譯為繁體中文：")
+                with st.spinner("正在抓取權威外媒並翻譯為繁體中文..."):
+                    news_items = fetch_authoritative_news(r["symbol"], max_items=6)
                 render_news_list(news_items, show_symbol=False)
 
             with t_val:
@@ -700,7 +753,7 @@ with tab_detail:
                 ])
 
 # ==========================================
-# Tab 3: 🔒 私人庫存 (獨立分頁 + 隱私遮罩 + 持倉重大新聞)
+# Tab 3: 🔒 私人庫存
 # ==========================================
 with tab_port:
     default_portfolio = pd.DataFrame([
@@ -803,11 +856,12 @@ with tab_port:
             </div>
             """, unsafe_allow_html=True)
 
-        # 持倉股專屬重大新聞快訊
+        # 持倉股專屬：權威外媒重大新聞快訊 (繁中)
         st.write("")
-        with st.expander("🔥 查看影響目前持倉的重大新聞快訊", expanded=False):
-            port_news = []
-            for p in positions:
-                port_news.extend(fetch_major_news(p["sym"], max_items=3))
-            port_news.sort(key=lambda x: (x["is_major"], x["date"]), reverse=True)
-            render_news_list(port_news[:6], show_symbol=True)
+        with st.expander("🔥 查看影響目前持倉的權威外媒重大新聞（繁體中文）", expanded=False):
+            with st.spinner("正在抓取 Reuters / Bloomberg / CNBC 等權威報導並翻譯..."):
+                port_news = []
+                for p in positions:
+                    port_news.extend(fetch_authoritative_news(p["sym"], max_items=3))
+                port_news.sort(key=lambda x: (x["is_major"], x["date"]), reverse=True)
+                render_news_list(port_news[:6], show_symbol=True)
