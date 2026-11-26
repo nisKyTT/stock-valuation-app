@@ -1,6 +1,7 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+from datetime import datetime
 
 # --- 網頁基礎設定 ---
 st.set_page_config(
@@ -9,10 +10,9 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- 券商級深色 App 風格 CSS (已修正桌面與手機版 RWD) ---
+# --- 券商級深色 App 風格 CSS (桌面與手機 RWD 優化) ---
 st.markdown("""
 <style>
-    /* 全局深邃暗黑背景與安全邊距 (避免被頂部工具列與底部浮動鈕遮擋) */
     .stApp {
         background-color: #0b0e11;
         color: #eaecef;
@@ -25,7 +25,7 @@ st.markdown("""
         max-width: 960px;
     }
 
-    /* 分頁導覽列 (仿券商 App 紅底線分頁) */
+    /* 分頁導覽列 */
     .stTabs [data-baseweb="tab-list"] {
         gap: 0px;
         border-bottom: 1px solid #2b3139;
@@ -44,7 +44,7 @@ st.markdown("""
         border-bottom: 2px solid #ef4444 !important;
     }
 
-    /* 頂部大盤指數三欄並排網格 (手機版也保持橫向並排，不垂直堆疊) */
+    /* 頂部大盤指數三欄並排網格 */
     .idx-grid {
         display: grid;
         grid-template-columns: repeat(3, 1fr);
@@ -110,12 +110,11 @@ st.markdown("""
     .price-text { font-size: 16px; font-weight: 700; }
     .chg-text { font-size: 11px; font-weight: 600; margin-top: 2px; white-space: nowrap; }
 
-    /* 美股習慣：綠漲紅跌 */
     .up { color: #22c55e; }
     .down { color: #ef4444; }
     .neutral { color: #9ca3af; }
 
-    /* 評級小標籤 */
+    /* 評級與新聞標籤 */
     .pill {
         display: inline-block;
         padding: 2px 6px;
@@ -141,7 +140,32 @@ st.markdown("""
     .kv-hint { font-size: 11px; color: #848e9c; margin-top: 2px; }
     .kv-val { font-size: 14px; font-weight: 700; color: #ffffff; text-align: right; white-space: nowrap; margin-left: 10px; }
 
-    /* 手機窄螢幕專屬微調 */
+    /* 新聞卡片 */
+    .news-card {
+        display: block;
+        text-decoration: none !important;
+        background: #111418;
+        border-bottom: 1px solid #1e2329;
+        padding: 12px 14px;
+        transition: background 0.15s;
+    }
+    .news-card:hover { background: #181c22; }
+    .news-title {
+        font-size: 14px;
+        font-weight: 600;
+        color: #f3f4f6;
+        line-height: 1.45;
+        margin-bottom: 6px;
+    }
+    .news-meta {
+        font-size: 11px;
+        color: #848e9c;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+    }
+
     @media (max-width: 640px) {
         .block-container {
             padding-top: 4.2rem !important;
@@ -175,8 +199,7 @@ def fmt_num(val, is_pct=False, is_currency=False, decimals=2):
     return f"{val:.{decimals}f}"
 
 def fmt_signed_usd(val, decimals=2):
-    if val >= 0:
-        return f"+${val:,.{decimals}f}"
+    if val >= 0: return f"+${val:,.{decimals}f}"
     return f"-${abs(val):,.{decimals}f}"
 
 def get_pill_html(verdict):
@@ -202,6 +225,85 @@ def render_gauge_svg(score, verdict):
     </div>
     """
 
+# --- 精選重大市場新聞抓取引擎 (快取 15 分鐘) ---
+HIGH_IMPACT_KEYWORDS = {
+    "財報/業績": ["earnings", "revenue", "guidance", "quarter", "q1", "q2", "q3", "q4", "profit", "beat", "miss", "forecast", "outlook", "sales"],
+    "政策/監管": ["tariff", "trump", "fed", "rate", "antitrust", "doj", "lawsuit", "china", "export", "ban", "sanction", "chips act", "regulation", "sec"],
+    "評級/目標價": ["upgrade", "downgrade", "price target", "buy rating", "sell rating", "analyst", "wall street", "overweight"],
+    "AI/重大業務": ["ai", "chip", "2nm", "cloud", "nvidia", "openai", "datacenter", "capex", "acquisition", "merger", "deal", "partnership", "dividend", "buyback"]
+}
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_major_news(ticker_symbol, max_items=6):
+    symbol = ticker_symbol.strip().upper()
+    try:
+        raw_news = yf.Ticker(symbol).news or []
+    except Exception:
+        return []
+
+    parsed = []
+    for item in raw_news:
+        # 相容新版與舊版 yfinance 新聞格式
+        if isinstance(item, dict) and isinstance(item.get("content"), dict):
+            c = item["content"]
+            title = c.get("title", "")
+            publisher = (c.get("provider") or {}).get("displayName", "財經新聞")
+            link = (c.get("canonicalUrl") or {}).get("url") or (c.get("clickThroughUrl") or {}).get("url") or "#"
+            pub_date = c.get("pubDate", "")
+            date_str = pub_date[:10] if len(pub_date) >= 10 else ""
+        else:
+            title = item.get("title", "")
+            publisher = item.get("publisher", "財經新聞")
+            link = item.get("link", "#")
+            ts = item.get("providerPublishTime")
+            date_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d") if ts else ""
+
+        if not title:
+            continue
+
+        t_lower = title.lower()
+        matched_tags = []
+        for tag, kws in HIGH_IMPACT_KEYWORDS.items():
+            if any(kw in t_lower for kw in kws):
+                matched_tags.append(tag)
+
+        is_major = len(matched_tags) > 0
+        parsed.append({
+            "symbol": symbol,
+            "title": title,
+            "publisher": publisher,
+            "link": link,
+            "date": date_str,
+            "is_major": is_major,
+            "tags": matched_tags[:2]
+        })
+
+    # 重大影響新聞優先排最前面
+    parsed.sort(key=lambda x: (x["is_major"], len(x["tags"]), x["date"]), reverse=True)
+    return parsed[:max_items]
+
+def render_news_list(news_items, show_symbol=False):
+    if not news_items:
+        st.info("暫無最新相關新聞數據。")
+        return
+    html = '<div style="border:1px solid #2b3139; border-radius:10px; overflow:hidden;">'
+    for n in news_items:
+        sym_badge = f'<span class="us-tag">{n["symbol"]}</span>' if show_symbol else ""
+        major_badge = '<span class="pill pill-red">🔥 重大影響</span>' if n["is_major"] else '<span class="pill pill-gray">市場動態</span>'
+        tag_html = "".join([f'<span class="pill pill-yellow">{t}</span>' for t in n["tags"]])
+        html += f"""
+        <a href="{n['link']}" target="_blank" class="news-card">
+            <div class="news-title">{sym_badge}{n['title']}</div>
+            <div class="news-meta">
+                {major_badge}
+                {tag_html}
+                <span>{n['publisher']}</span>
+                <span>{n['date']}</span>
+            </div>
+        </a>"""
+    html += '</div>'
+    st.markdown(html, unsafe_allow_html=True)
+
 # --- 抓取美股三大指數 (快取 10 分鐘) ---
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_indices():
@@ -209,8 +311,7 @@ def fetch_indices():
     out = []
     for sym, label in indices:
         try:
-            t = yf.Ticker(sym)
-            info = t.info
+            info = yf.Ticker(sym).info
             price = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("navPrice")
             prev = info.get("previousClose") or info.get("regularMarketPreviousClose")
             chg = (price - prev) if (price and prev) else 0.0
@@ -434,7 +535,7 @@ def analyze_stock_data(ticker_symbol):
     }
 
 # ==========================================
-# 頂部：美股三大指數色塊 (CSS Grid 強制 3 欄並排)
+# 頂部：美股三大指數色塊 (公開資訊，無隱私疑慮)
 # ==========================================
 idx_data = fetch_indices()
 idx_html = '<div class="idx-grid">'
@@ -452,107 +553,14 @@ idx_html += '</div>'
 st.markdown(idx_html, unsafe_allow_html=True)
 
 # ==========================================
-# 主分頁導覽
+# 主分頁導覽 (已將「私人庫存」移至最後一頁，避免開啟即曝光)
 # ==========================================
-tab1, tab2, tab3 = st.tabs(["庫存總覽", "自選排行", "個股體檢"])
-
-# ==========================================
-# Tab 1: 庫存總覽
-# ==========================================
-with tab1:
-    default_portfolio = pd.DataFrame([
-        {"股票代號": "GOOG", "持倉股數": 28.5177, "成本均價(USD)": 280.55, "目標價(USD)": 350.00},
-        {"股票代號": "TSM",  "持倉股數": 4.2200,  "成本均價(USD)": 379.38, "目標價(USD)": 455.00},
-    ])
-
-    col_t1, col_t2 = st.columns([3, 1])
-    with col_t2:
-        if st.button("🔄 刷新報價", use_container_width=True):
-            st.cache_data.clear()
-
-    with st.expander("⚙️ 編輯庫存股數 / 新增試算標的", expanded=False):
-        edited_df = st.data_editor(
-            default_portfolio, num_rows="dynamic", use_container_width=True, hide_index=True,
-            column_config={
-                "股票代號": st.column_config.TextColumn("代號", required=True),
-                "持倉股數": st.column_config.NumberColumn("股數", min_value=0.0, format="%.4f", required=True),
-                "成本均價(USD)": st.column_config.NumberColumn("均價", min_value=0.0, format="$%.2f", required=True),
-                "目標價(USD)": st.column_config.NumberColumn("目標價", min_value=0.0, format="$%.2f", required=True),
-            }
-        )
-
-    positions, total_cost, total_value = [], 0.0, 0.0
-    for _, row in edited_df.iterrows():
-        sym = str(row["股票代號"]).strip().upper()
-        shares = float(row["持倉股數"] or 0)
-        avg_cost = float(row["成本均價(USD)"] or 0)
-        target = float(row["目標價(USD)"] or 0)
-        if not sym or shares <= 0: continue
-        res = analyze_stock_data(sym)
-        if "error" in res: continue
-
-        price = float(res["price"])
-        cost_basis = shares * avg_cost
-        market_val = shares * price
-        pnl_usd = market_val - cost_basis
-        pnl_pct = (pnl_usd / cost_basis * 100) if cost_basis > 0 else 0.0
-        dist_pct = ((target - price) / price * 100) if (target > 0 and price > 0) else None
-
-        total_cost += cost_basis
-        total_value += market_val
-        positions.append({
-            "sym": sym, "name": res["name"], "price": price, "day_chg": res["day_chg"],
-            "day_chg_pct": res["day_chg_pct"], "shares": shares, "avg_cost": avg_cost,
-            "pnl_usd": pnl_usd, "pnl_pct": pnl_pct, "target": target, "dist_pct": dist_pct,
-            "score": res["score"], "verdict": res["verdict"]
-        })
-
-    if positions:
-        total_pnl = total_value - total_cost
-        total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0.0
-        pnl_cls = "up" if total_pnl >= 0 else "down"
-
-        st.caption(f"共 {len(positions)} 檔美股，總成本 USD ${total_cost:,.2f} ｜ 現值 USD ${total_value:,.2f}")
-        st.markdown(f"""
-        <div class="pnl-box">
-            <div class="pnl-col">
-                <div class="pnl-val {pnl_cls}">{fmt_signed_usd(total_pnl, 2)}</div>
-                <div class="pnl-lbl">未實現損益 (USD)</div>
-            </div>
-            <div class="pnl-divider"></div>
-            <div class="pnl-col">
-                <div class="pnl-val {pnl_cls}">{total_pnl_pct:+.2f}%</div>
-                <div class="pnl-lbl">總報酬率</div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        for p in positions:
-            d_cls = "up" if p["day_chg"] >= 0 else "down"
-            d_arrow = "▲" if p["day_chg"] >= 0 else "▼"
-            p_cls = "up" if p["pnl_usd"] >= 0 else "down"
-            target_str = f"目標 ${p['target']:.0f} ({p['dist_pct']:+.1f}%)" if p["dist_pct"] is not None else "無目標價"
-            st.markdown(f"""
-            <div class="stock-row">
-                <div class="row-left">
-                    <div><span class="us-tag">US</span><span class="sym-text">{p['sym']}</span></div>
-                    <div class="sub-text">均價 ${p['avg_cost']:.2f} · {p['shares']:.2f}股</div>
-                </div>
-                <div class="row-mid">
-                    <div class="price-text {d_cls}">${p['price']:.2f}</div>
-                    <div class="chg-text {d_cls}">{d_arrow}{abs(p['day_chg']):.2f} ({p['day_chg_pct']:+.2f}%)</div>
-                </div>
-                <div class="row-right">
-                    <div class="price-text {p_cls}">{fmt_signed_usd(p['pnl_usd'], 1)}</div>
-                    <div class="sub-text">{target_str} · {p['score']}分</div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+tab_watch, tab_detail, tab_port = st.tabs(["自選排行", "個股體檢", "🔒 私人庫存"])
 
 # ==========================================
-# Tab 2: 自選組合批次排行
+# Tab 1 (預設首頁): 自選組合批次排行
 # ==========================================
-with tab2:
+with tab_watch:
     groups = {
         "全部自選 (20檔)": "GOOG, TSM, NVDA, MSFT, AMZN, META, AAPL, ASML, AMD, AVGO, VRT, V, MA, AXP, JPM, O, ABBV, TGT, MMM, VZ",
         "科技與AI核心": "GOOG, TSM, NVDA, MSFT, AMZN, META, AAPL, ASML, AMD, AVGO, VRT",
@@ -599,9 +607,9 @@ with tab2:
                 """, unsafe_allow_html=True)
 
 # ==========================================
-# Tab 3: 個股深度體檢
+# Tab 2: 個股深度體檢 (含精選重大市場新聞)
 # ==========================================
-with tab3:
+with tab_detail:
     c_in, c_btn = st.columns([4, 1])
     with c_in:
         single_ticker = st.text_input("輸入美股代號", value="TSM", label_visibility="collapsed", placeholder="輸入美股代號，例如 GOOG, TSM, JPM, O")
@@ -640,7 +648,7 @@ with tab3:
                 elif not r["reasons"]:
                     st.info("各項財務數據表現均衡，暫無極端優勢或紅旗警示。")
 
-            t_val, t_prof, t_risk = st.tabs(["估值倍數", "獲利與現金流", "股息與風險"])
+            t_news, t_val, t_prof, t_risk = st.tabs(["📰 重大新聞", "估值倍數", "獲利與現金流", "股息與風險"])
 
             def render_kv_list(items):
                 html = '<div style="border:1px solid #2b3139; border-radius:10px; overflow:hidden;">'
@@ -655,6 +663,11 @@ with tab3:
                     </div>"""
                 html += '</div>'
                 st.markdown(html, unsafe_allow_html=True)
+
+            with t_news:
+                st.caption("已自動篩選並置頂「財報、政策監管、機構評級、AI與重大業務」相關市場新聞（點擊可開原文）：")
+                news_items = fetch_major_news(r["symbol"], max_items=6)
+                render_news_list(news_items, show_symbol=False)
 
             with t_val:
                 render_kv_list([
@@ -685,3 +698,116 @@ with tab3:
                     ("負債權益比 (Debt/Equity)", fmt_num(r["debt_to_equity"]), "< 100% 財務穩健，> 150% 對利率敏感"),
                     ("52 週價格區間", f"{fmt_num(r['low_52w'], is_currency=True)} - {fmt_num(r['high_52w'], is_currency=True)}", f"目前距 52 週高點 {fmt_num(r['pct_from_high'], is_pct=True)}"),
                 ])
+
+# ==========================================
+# Tab 3: 🔒 私人庫存 (獨立分頁 + 隱私遮罩 + 持倉重大新聞)
+# ==========================================
+with tab_port:
+    default_portfolio = pd.DataFrame([
+        {"股票代號": "GOOG", "持倉股數": 28.5177, "成本均價(USD)": 280.55, "目標價(USD)": 350.00},
+        {"股票代號": "TSM",  "持倉股數": 4.2200,  "成本均價(USD)": 379.38, "目標價(USD)": 455.00},
+    ])
+
+    ctrl1, ctrl2 = st.columns([2, 1])
+    with ctrl1:
+        hide_amounts = st.toggle("🙈 隱私遮罩（隱藏金額與股數）", value=False)
+    with ctrl2:
+        if st.button("🔄 刷新報價", use_container_width=True):
+            st.cache_data.clear()
+
+    with st.expander("⚙️ 編輯庫存股數 / 新增試算標的", expanded=False):
+        edited_df = st.data_editor(
+            default_portfolio, num_rows="dynamic", use_container_width=True, hide_index=True,
+            column_config={
+                "股票代號": st.column_config.TextColumn("代號", required=True),
+                "持倉股數": st.column_config.NumberColumn("股數", min_value=0.0, format="%.4f", required=True),
+                "成本均價(USD)": st.column_config.NumberColumn("均價", min_value=0.0, format="$%.2f", required=True),
+                "目標價(USD)": st.column_config.NumberColumn("目標價", min_value=0.0, format="$%.2f", required=True),
+            }
+        )
+
+    positions, total_cost, total_value = [], 0.0, 0.0
+    for _, row in edited_df.iterrows():
+        sym = str(row["股票代號"]).strip().upper()
+        shares = float(row["持倉股數"] or 0)
+        avg_cost = float(row["成本均價(USD)"] or 0)
+        target = float(row["目標價(USD)"] or 0)
+        if not sym or shares <= 0: continue
+        res = analyze_stock_data(sym)
+        if "error" in res: continue
+
+        price = float(res["price"])
+        cost_basis = shares * avg_cost
+        market_val = shares * price
+        pnl_usd = market_val - cost_basis
+        pnl_pct = (pnl_usd / cost_basis * 100) if cost_basis > 0 else 0.0
+        dist_pct = ((target - price) / price * 100) if (target > 0 and price > 0) else None
+
+        total_cost += cost_basis
+        total_value += market_val
+        positions.append({
+            "sym": sym, "name": res["name"], "price": price, "day_chg": res["day_chg"],
+            "day_chg_pct": res["day_chg_pct"], "shares": shares, "avg_cost": avg_cost,
+            "pnl_usd": pnl_usd, "pnl_pct": pnl_pct, "target": target, "dist_pct": dist_pct,
+            "score": res["score"], "verdict": res["verdict"]
+        })
+
+    if positions:
+        total_pnl = total_value - total_cost
+        total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0.0
+        pnl_cls = "up" if total_pnl >= 0 else "down"
+
+        if hide_amounts:
+            st.caption(f"共 {len(positions)} 檔美股 ｜ 隱私遮罩已開啟")
+            pnl_display = "****"
+        else:
+            st.caption(f"共 {len(positions)} 檔美股，總成本 USD ${total_cost:,.2f} ｜ 現值 USD ${total_value:,.2f}")
+            pnl_display = fmt_signed_usd(total_pnl, 2)
+
+        st.markdown(f"""
+        <div class="pnl-box">
+            <div class="pnl-col">
+                <div class="pnl-val {pnl_cls}">{pnl_display}</div>
+                <div class="pnl-lbl">未實現損益 (USD)</div>
+            </div>
+            <div class="pnl-divider"></div>
+            <div class="pnl-col">
+                <div class="pnl-val {pnl_cls}">{total_pnl_pct:+.2f}%</div>
+                <div class="pnl-lbl">總報酬率</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        for p in positions:
+            d_cls = "up" if p["day_chg"] >= 0 else "down"
+            d_arrow = "▲" if p["day_chg"] >= 0 else "▼"
+            p_cls = "up" if p["pnl_usd"] >= 0 else "down"
+            target_str = f"目標 ${p['target']:.0f} ({p['dist_pct']:+.1f}%)" if p["dist_pct"] is not None else "無目標價"
+            sub_left = "均價 **** · **股" if hide_amounts else f"均價 ${p['avg_cost']:.2f} · {p['shares']:.2f}股"
+            pnl_right = "****" if hide_amounts else fmt_signed_usd(p["pnl_usd"], 1)
+
+            st.markdown(f"""
+            <div class="stock-row">
+                <div class="row-left">
+                    <div><span class="us-tag">US</span><span class="sym-text">{p['sym']}</span></div>
+                    <div class="sub-text">{sub_left}</div>
+                </div>
+                <div class="row-mid">
+                    <div class="price-text {d_cls}">${p['price']:.2f}</div>
+                    <div class="chg-text {d_cls}">{d_arrow}{abs(p['day_chg']):.2f} ({p['day_chg_pct']:+.2f}%)</div>
+                </div>
+                <div class="row-right">
+                    <div class="price-text {p_cls}">{pnl_right}</div>
+                    <div class="sub-text">{target_str} · {p['score']}分</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # 持倉股專屬重大新聞快訊
+        st.write("")
+        with st.expander("🔥 查看影響目前持倉的重大新聞快訊", expanded=False):
+            port_news = []
+            for p in positions:
+                port_news.extend(fetch_major_news(p["sym"], max_items=3))
+            port_news.sort(key=lambda x: (x["is_major"], x["date"]), reverse=True)
+            render_news_list(port_news[:6], show_symbol=True)
