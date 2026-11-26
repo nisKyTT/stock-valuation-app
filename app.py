@@ -146,13 +146,20 @@ st.markdown("""
     .kv-hint { font-size: 11px; color: #848e9c; margin-top: 2px; }
     .kv-val { font-size: 14px; font-weight: 700; color: #ffffff; text-align: right; white-space: nowrap; margin-left: 10px; }
 
-    /* 權威新聞條目卡片 */
-    .news-box {
+    /* 權威新聞可點擊卡片 (直連原文) */
+    .news-link-card {
+        display: block;
+        text-decoration: none !important;
         background: #111418;
         border: 1px solid #1e2329;
         border-radius: 10px;
-        padding: 12px 14px;
+        padding: 13px 14px;
         margin-bottom: 10px;
+        transition: border-color 0.2s, background 0.15s;
+    }
+    .news-link-card:hover {
+        background: #181c22;
+        border-color: #3b82f6;
     }
     .news-title-zh {
         font-size: 15px;
@@ -345,43 +352,20 @@ def fetch_authoritative_news(ticker_symbol, max_items=6):
         n["title_zh"] = translate_to_zh_tw(n["title_en"])
     return top_news
 
-# --- 彈窗對話框：App 內直接閱讀繁體中文重大新聞摘要 ---
-@st.dialog("📰 權威財經新聞（繁體中文解讀）")
-def show_news_dialog(news_item):
-    st.markdown(f"### {news_item['title_zh']}")
-    st.caption(f"英文原文：{news_item['title_en']}")
-    st.divider()
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.write(f"🏢 **出處媒體**：{news_item['publisher']}")
-        st.write(f"📅 **發布日期**：{news_item['date']}")
-    with c2:
-        st.write(f"📌 **影響標的**：{news_item['symbol']}")
-        st.write(f"🏷️ **事件類別**：{' · '.join(news_item['tags']) if news_item['tags'] else '市場動態'}")
-
-    st.markdown("""
-    > **💡 實戰解讀提示：**
-    > 此報導經由全球權威通訊社篩選，主要涉及該標的之政策、財報或核心業務催化劑。若涉及關稅或反壟斷，通常會短期放大股價波動，可結合估值分數判斷是否為「恐慌錯殺加碼點」。
-    """)
-
-    if news_item["link"] and news_item["link"] != "#":
-        st.link_button("🌐 前往外媒官方網站查看全文報導", news_item["link"], use_container_width=True)
-
-def render_news_list(news_items, key_prefix="news", show_symbol=False):
+def render_news_list(news_items, show_symbol=False):
     if not news_items:
         st.info("近 14 天內暫無權威財經媒體相關報導。")
         return
 
-    for idx, n in enumerate(news_items):
+    for n in news_items:
         sym_badge = f'<span class="us-tag">{n["symbol"]}</span>' if show_symbol else ""
         major_badge = '<span class="pill pill-red">🔥 重大影響</span>' if n["is_major"] else '<span class="pill pill-gray">市場動態</span>'
         pub_badge = f'<span class="pill pill-blue">{n["publisher"]}</span>'
         tag_html = "".join([f'<span class="pill pill-yellow">{t}</span>' for t in n["tags"]])
 
         st.markdown(f"""
-        <div class="news-box">
-            <div class="news-title-zh">{sym_badge}{n['title_zh']}</div>
+        <a href="{n['link']}" target="_blank" class="news-link-card">
+            <div class="news-title-zh">{sym_badge}{n['title_zh']} <span style="font-size:11px; color:#60a5fa; font-weight:normal;">[外媒原文 ↗]</span></div>
             <div class="news-title-en">{n['title_en']}</div>
             <div class="news-meta">
                 {major_badge}
@@ -389,11 +373,8 @@ def render_news_list(news_items, key_prefix="news", show_symbol=False):
                 {tag_html}
                 <span>{n['date']}</span>
             </div>
-        </div>
+        </a>
         """, unsafe_allow_html=True)
-
-        if st.button(f"📖 閱讀繁中解讀詳情", key=f"{key_prefix}_{idx}"):
-            show_news_dialog(n)
 
 # --- 抓取美股三大指數 (含多重備援) ---
 @st.cache_data(ttl=600, show_spinner=False)
@@ -622,6 +603,7 @@ def analyze_stock_data(ticker_symbol):
             if roa > 0.10: score += 10; reasons.append(f"ROA {roa*100:.1f}% 資產效率極高")
             elif roa > 0.05: score += 6
             elif roa > 0: score += 2
+        else: warnings.append("ROA 為負數")
         if net_income is not None and net_income > 0: score += 7
         else: warnings.append("處於淨虧損 (Net Loss)")
         if op_income is not None and op_income > 0: score += 6
@@ -771,7 +753,7 @@ with tab_detail:
                 elif not r["reasons"]:
                     st.info("各項財務數據表現均衡，暫無極端優勢或紅旗警示。")
 
-            t_news, t_val, t_prof, t_risk = st.tabs(["📰 權威新聞 (繁中)", "估值倍數", "獲利與現金流", "股息與風險"])
+            t_news, t_val, t_prof, t_risk = st.tabs(["📰 重大新聞 (繁中)", "估值倍數", "獲利與現金流", "股息與風險"])
 
             def render_kv_list(items):
                 html = '<div style="border:1px solid #2b3139; border-radius:10px; overflow:hidden;">'
@@ -788,10 +770,10 @@ with tab_detail:
                 st.markdown(html, unsafe_allow_html=True)
 
             with t_news:
-                st.caption("點擊下方「閱讀繁中解讀詳情」彈出閱讀視窗，免去外部轉址失敗困擾：")
+                st.caption("直連全球 7 大權威外媒（已翻譯為繁體中文，點擊卡片直接直連英文原文）：")
                 with st.spinner("正在抓取權威外媒並直譯為繁體中文..."):
                     news_items = fetch_authoritative_news(r["symbol"], max_items=6)
-                render_news_list(news_items, key_prefix="detail_news", show_symbol=False)
+                render_news_list(news_items, show_symbol=False)
 
             with t_val:
                 render_kv_list([
@@ -934,4 +916,4 @@ with tab_port:
                 for p in positions:
                     port_news.extend(fetch_authoritative_news(p["sym"], max_items=3))
                 port_news.sort(key=lambda x: (x["is_major"], x["date"]), reverse=True)
-                render_news_list(port_news[:6], key_prefix="port_news", show_symbol=True)
+                render_news_list(port_news[:6], show_symbol=True)
