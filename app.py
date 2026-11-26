@@ -244,7 +244,6 @@ def translate_to_zh_tw(text):
         return text
     clean_text = text.strip()
 
-    # 通道 1: MyMemory 開放翻譯 API (最耐伺服器 IP 請求)
     try:
         url = f"https://api.mymemory.translated.net/get?q={urllib.parse.quote(clean_text)}&langpair=en|zh-TW"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -256,7 +255,6 @@ def translate_to_zh_tw(text):
     except Exception:
         pass
 
-    # 通道 2: Google Translate 備援 (附帶防阻擋 Header)
     try:
         url = "https://translate.googleapis.com/translate_a/single"
         params = {"client": "gtx", "sl": "en", "tl": "zh-TW", "dt": "t", "q": clean_text}
@@ -360,17 +358,28 @@ def render_news_list(news_items, show_symbol=False):
         major_badge = '<span class="pill pill-red">🔥 重大影響</span>' if n["is_major"] else '<span class="pill pill-gray">市場動態</span>'
         pub_badge = f'<span class="pill pill-blue">{n["publisher"]}</span>'
         tag_html = "".join([f'<span class="pill pill-yellow">{t}</span>' for t in n["tags"]])
+        
+        # 自動封裝為 Google 全網頁繁中翻譯代理連結
+        raw_link = n["link"]
+        if raw_link and raw_link != "#":
+            trans_link = f"https://translate.google.com/translate?sl=auto&tl=zh-TW&u={urllib.parse.quote(raw_link)}"
+        else:
+            trans_link = "#"
+
         html += f"""
-        <a href="{n['link']}" target="_blank" class="news-card">
-            <div class="news-title-zh">{sym_badge}{n['title_zh']}</div>
-            <div class="news-title-en">{n['title_en']}</div>
+        <div style="background:#111418; border-bottom:1px solid #1e2329; padding:13px 14px; transition:background 0.15s;">
+            <a href="{trans_link}" target="_blank" style="text-decoration:none;">
+                <div class="news-title-zh">{sym_badge}{n['title_zh']} <span style="font-size:11px; color:#60a5fa; font-weight:normal;">[點擊閱讀繁中全文 ↗]</span></div>
+                <div class="news-title-en">{n['title_en']}</div>
+            </a>
             <div class="news-meta">
                 {major_badge}
                 {pub_badge}
                 {tag_html}
                 <span>{n['date']}</span>
+                <span style="margin-left:auto;"><a href="{raw_link}" target="_blank" style="color:#848e9c; text-decoration:underline;">英文原文</a></span>
             </div>
-        </a>"""
+        </div>"""
     html += '</div>'
     st.markdown(html, unsafe_allow_html=True)
 
@@ -767,7 +776,7 @@ with tab_detail:
                 st.markdown(html, unsafe_allow_html=True)
 
             with t_news:
-                st.caption("直連全球 7 大權威媒體（Reuters / Bloomberg / WSJ / FT / CNBC / Barron's / MarketWatch），已由官方引擎直譯為繁體中文：")
+                st.caption("直連全球 7 大權威媒體（點擊標題直接打開 Google 全網頁繁中翻譯）：")
                 with st.spinner("正在抓取權威外媒並直譯為繁體中文..."):
                     news_items = fetch_authoritative_news(r["symbol"], max_items=6)
                 render_news_list(news_items, show_symbol=False)
