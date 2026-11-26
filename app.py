@@ -15,7 +15,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- 券商級深色 App 風格 CSS (桌面與手機 RWD 優化) ---
+# --- 券商級深色 App 風格 CSS ---
 st.markdown("""
 <style>
     .stApp {
@@ -146,16 +146,14 @@ st.markdown("""
     .kv-hint { font-size: 11px; color: #848e9c; margin-top: 2px; }
     .kv-val { font-size: 14px; font-weight: 700; color: #ffffff; text-align: right; white-space: nowrap; margin-left: 10px; }
 
-    /* 權威新聞卡片 */
-    .news-card {
-        display: block;
-        text-decoration: none !important;
+    /* 權威新聞條目卡片 */
+    .news-box {
         background: #111418;
-        border-bottom: 1px solid #1e2329;
-        padding: 13px 14px;
-        transition: background 0.15s;
+        border: 1px solid #1e2329;
+        border-radius: 10px;
+        padding: 12px 14px;
+        margin-bottom: 10px;
     }
-    .news-card:hover { background: #181c22; }
     .news-title-zh {
         font-size: 15px;
         font-weight: 700;
@@ -167,7 +165,7 @@ st.markdown("""
         font-size: 11px;
         color: #848e9c;
         line-height: 1.35;
-        margin-bottom: 7px;
+        margin-bottom: 8px;
     }
     .news-meta {
         font-size: 11px;
@@ -237,11 +235,10 @@ def render_gauge_svg(score, verdict):
     </div>
     """
 
-# --- 雙通道穩定繁體中文翻譯引擎 (MyMemory + Google Fallback) ---
+# --- 雙通道穩定繁體中文翻譯引擎 ---
 @st.cache_data(ttl=86400, show_spinner=False)
 def translate_to_zh_tw(text):
-    if not text:
-        return text
+    if not text: return text
     clean_text = text.strip()
 
     try:
@@ -260,7 +257,7 @@ def translate_to_zh_tw(text):
         params = {"client": "gtx", "sl": "en", "tl": "zh-TW", "dt": "t", "q": clean_text}
         req_url = f"{url}?{urllib.parse.urlencode(params)}"
         req = urllib.request.Request(req_url, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Referer": "https://translate.google.com/"
         })
         with urllib.request.urlopen(req, timeout=4) as response:
@@ -348,40 +345,55 @@ def fetch_authoritative_news(ticker_symbol, max_items=6):
         n["title_zh"] = translate_to_zh_tw(n["title_en"])
     return top_news
 
-def render_news_list(news_items, show_symbol=False):
+# --- 彈窗對話框：App 內直接閱讀繁體中文重大新聞摘要 ---
+@st.dialog("📰 權威財經新聞（繁體中文解讀）")
+def show_news_dialog(news_item):
+    st.markdown(f"### {news_item['title_zh']}")
+    st.caption(f"英文原文：{news_item['title_en']}")
+    st.divider()
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.write(f"🏢 **出處媒體**：{news_item['publisher']}")
+        st.write(f"📅 **發布日期**：{news_item['date']}")
+    with c2:
+        st.write(f"📌 **影響標的**：{news_item['symbol']}")
+        st.write(f"🏷️ **事件類別**：{' · '.join(news_item['tags']) if news_item['tags'] else '市場動態'}")
+
+    st.markdown("""
+    > **💡 實戰解讀提示：**
+    > 此報導經由全球權威通訊社篩選，主要涉及該標的之政策、財報或核心業務催化劑。若涉及關稅或反壟斷，通常會短期放大股價波動，可結合估值分數判斷是否為「恐慌錯殺加碼點」。
+    """)
+
+    if news_item["link"] and news_item["link"] != "#":
+        st.link_button("🌐 前往外媒官方網站查看全文報導", news_item["link"], use_container_width=True)
+
+def render_news_list(news_items, key_prefix="news", show_symbol=False):
     if not news_items:
         st.info("近 14 天內暫無權威財經媒體相關報導。")
         return
-    html = '<div style="border:1px solid #2b3139; border-radius:10px; overflow:hidden;">'
-    for n in news_items:
+
+    for idx, n in enumerate(news_items):
         sym_badge = f'<span class="us-tag">{n["symbol"]}</span>' if show_symbol else ""
         major_badge = '<span class="pill pill-red">🔥 重大影響</span>' if n["is_major"] else '<span class="pill pill-gray">市場動態</span>'
         pub_badge = f'<span class="pill pill-blue">{n["publisher"]}</span>'
         tag_html = "".join([f'<span class="pill pill-yellow">{t}</span>' for t in n["tags"]])
-        
-        # 自動封裝為 Google 全網頁繁中翻譯代理連結
-        raw_link = n["link"]
-        if raw_link and raw_link != "#":
-            trans_link = f"https://translate.google.com/translate?sl=auto&tl=zh-TW&u={urllib.parse.quote(raw_link)}"
-        else:
-            trans_link = "#"
 
-        html += f"""
-        <div style="background:#111418; border-bottom:1px solid #1e2329; padding:13px 14px; transition:background 0.15s;">
-            <a href="{trans_link}" target="_blank" style="text-decoration:none;">
-                <div class="news-title-zh">{sym_badge}{n['title_zh']} <span style="font-size:11px; color:#60a5fa; font-weight:normal;">[點擊閱讀繁中全文 ↗]</span></div>
-                <div class="news-title-en">{n['title_en']}</div>
-            </a>
+        st.markdown(f"""
+        <div class="news-box">
+            <div class="news-title-zh">{sym_badge}{n['title_zh']}</div>
+            <div class="news-title-en">{n['title_en']}</div>
             <div class="news-meta">
                 {major_badge}
                 {pub_badge}
                 {tag_html}
                 <span>{n['date']}</span>
-                <span style="margin-left:auto;"><a href="{raw_link}" target="_blank" style="color:#848e9c; text-decoration:underline;">英文原文</a></span>
             </div>
-        </div>"""
-    html += '</div>'
-    st.markdown(html, unsafe_allow_html=True)
+        </div>
+        """, unsafe_allow_html=True)
+
+        if st.button(f"📖 閱讀繁中解讀詳情", key=f"{key_prefix}_{idx}"):
+            show_news_dialog(n)
 
 # --- 抓取美股三大指數 (含多重備援) ---
 @st.cache_data(ttl=600, show_spinner=False)
@@ -776,10 +788,10 @@ with tab_detail:
                 st.markdown(html, unsafe_allow_html=True)
 
             with t_news:
-                st.caption("直連全球 7 大權威媒體（點擊標題直接打開 Google 全網頁繁中翻譯）：")
+                st.caption("點擊下方「閱讀繁中解讀詳情」彈出閱讀視窗，免去外部轉址失敗困擾：")
                 with st.spinner("正在抓取權威外媒並直譯為繁體中文..."):
                     news_items = fetch_authoritative_news(r["symbol"], max_items=6)
-                render_news_list(news_items, show_symbol=False)
+                render_news_list(news_items, key_prefix="detail_news", show_symbol=False)
 
             with t_val:
                 render_kv_list([
@@ -922,4 +934,4 @@ with tab_port:
                 for p in positions:
                     port_news.extend(fetch_authoritative_news(p["sym"], max_items=3))
                 port_news.sort(key=lambda x: (x["is_major"], x["date"]), reverse=True)
-                render_news_list(port_news[:6], show_symbol=True)
+                render_news_list(port_news[:6], key_prefix="port_news", show_symbol=True)
